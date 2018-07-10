@@ -1,11 +1,20 @@
 ---
-title: "ZINB-WaVE + apeglm integration for single-cell RNA-seq"
+title: "ZINB-WaVE + apeglm for single-cell RNA-seq"
 author: "Michael Love"
 output: html_document
 ---
 
-Here we use the *splatter* package to simulate single-cell RNA-seq
-data.
+This document closely follows a similar
+one, [zinbwave-deseq2](https://github.com/mikelove/zinbwave-deseq2),
+showing integration of *zinbwave* with *DESeq2*. The difference is
+that here we additionally assess when *apeglm* effect size estimation
+may provide a benefit for zero-inflated Negative Binomial count data,
+as may be produced in a single cell RNA-seq experiment (scRNA-seq).
+*apeglm* effect sizes appear useful in the case that the groups of
+cells we want to compare have small sample size, e.g. here the two
+groups being compared have ~20 cells per group.
+
+We use the *splatter* package to simulate single-cell RNA-seq data.
 
 * Zappia, Phipson, and Oshlack "Splatter: simulation of single-cell RNA
 sequencing data" *Genome Biology* (2017)
@@ -25,6 +34,10 @@ RNA-seq tools for zero inflation and single-cell applications" *Genome Biology* 
 > readily discriminate between their underlying causes, i.e., between
 > technical (e.g., dropout) and biological (e.g., bursting) zeros. 
 
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+
 ```{r}
 suppressPackageStartupMessages(library(splatter))
 params <- newSplatParams()
@@ -36,7 +49,7 @@ params <- setParam(params, "de.prob", .01)
 params <- setParam(params, "dropout.type", "experiment")
 params <- setParam(params, "dropout.mid", 2)
 # three groups, we will show apeglm improvements on the two small groups
-sim <- splatSimulate(params, group.prob=c(.15, .15, .7),
+sim <- splatSimulate(params, group.prob=c(.2, .2, .6),
                      method="groups", seed=1)
 table(sim$Group)
 # define the true LFC
@@ -111,21 +124,28 @@ simple.lfc <- log2(rowMeans(ncts[,dds$condition == "Group2"]) + .1) -
 ```
 
 
-```{r plotlfc}
+```{r plotlfc, fig.width=7, fig.height=7}
 myplot <- function(x,y,n=20,...) {
   plot(x,y,ylim=c(-6,6),xlab="",ylab="",cex=.5,...)
   idx <- rank(-abs(y)) < n
   points(x[idx], y[idx], col="blue", cex=2)
   abline(0,1,col="red")
   legend("topleft",
-    legend=c(paste("cor =",
-      round(cor(x,y,use="complete"),3)),
+      legend=c(
+      paste("cor =",
+            round(cor(x,y,use="complete"),3)),
+      paste("MAE top =",
+            round(mean(abs(x[idx]-y[idx]), na.rm=TRUE),3)),
       paste("MAE =",
-      round(mean(abs(x[idx]-y[idx]), na.rm=TRUE),3))))
+            round(mean(abs(x-y), na.rm=TRUE),3))))
 }
 par(mfrow=c(2,2), mar=c(2,3,2,1))
 myplot(mcols(dds)$log2FC, lfc1$log2FoldChange, main="normal")
-myplot(mcols(dds)$log2FC, lfc2$log2FoldChange, main="apeglm wt NB")
-myplot(mcols(dds)$log2FC, lfc3, main="apeglm ZINB")
 myplot(mcols(dds)$log2FC, simple.lfc, main="pseudocount")
+myplot(mcols(dds)$log2FC, lfc2$log2FoldChange, main="apeglm + weight NB")
+myplot(mcols(dds)$log2FC, lfc3, main="apeglm + ZINB lik")
+```
+
+```{r}
+session_info()
 ```
