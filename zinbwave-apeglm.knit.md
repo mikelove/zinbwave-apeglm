@@ -12,7 +12,9 @@ may provide a benefit for zero-inflated Negative Binomial count data,
 as may be produced in a single cell RNA-seq experiment (scRNA-seq).
 *apeglm* effect sizes appear useful in the case that the groups of
 cells we want to compare have small sample size, e.g. here the two
-groups being compared have ~20 cells per group.
+groups being compared have ~20 cells per group. It outperforms the
+Normal distribution based shrinkage estimator when the ratio of DE
+genes is low.
 
 We use the *splatter* package to simulate single-cell RNA-seq data.
 
@@ -34,7 +36,30 @@ RNA-seq tools for zero inflation and single-cell applications" *Genome Biology* 
 > readily discriminate between their underlying causes, i.e., between
 > technical (e.g., dropout) and biological (e.g., bursting) zeros. 
 
+We will try two approaches to integrating with *apeglm*:
 
+1. Using *zinbwave* to define weights to account for the excess zeros,
+   then using the Negative Binomial likelihood with *apeglm*.
+2. Using *zinbwave* to define weights, then using these as a
+   parameter for the probability of a zero coming from the zero
+   component in a Zero-Inflated Negative Binomial likelihood with
+   *apeglm*.
+   
+These two approaches end up having nearly identical results, while the
+first is already built in to *DESeq2*'s *lfcShrink* function and has
+been optimized for speed.
+
+
+
+We construct simulated single cell data using *splatter*. The custom
+parameters here define 1% of genes to identify each sub-group (so
+comparing two groups we would expect 2% of genes to be DE), and the
+non-null LFCs are set to be centered at a log2 fold change of 2. The
+low percent of DE genes and relatively high LFC values help show the
+difference between the Normal- and t-distributed priors in *DESeq2* and
+*apeglm*. We specify three groups, where two of the groups will have
+20 cells on average, and we will see how to compare the LFC between
+these two groups.
 
 
 ```r
@@ -105,7 +130,15 @@ table(sim$Group)
 ```r
 # define the true LFC
 rowData(sim)$log2FC <- with(rowData(sim), log2(DEFacGroup2/DEFacGroup1))
+```
 
+As in the 
+[zinbwave-deseq2](https://github.com/mikelove/zinbwave-deseq2)
+repo, we run *zinbwave* to estimate the excess zeros and to define a
+weight matrix for these.
+
+
+```r
 library(zinbwave)
 keep <- rowSums(counts(sim) >= 10) >= 5
 table(keep)
@@ -124,14 +157,17 @@ nms <- c("counts", setdiff(assayNames(zinb), "counts"))
 assays(zinb) <- assays(zinb)[nms]
 # epsilon as recommended from Van den Berge and Perraudeau
 zinb <- zinbwave(zinb, K=0, BPPARAM=SerialParam(), epsilon=1e12)
+```
 
+We additionally run *DESeq2* to estimate dispersions and maximum
+likelihood estimates of log2 fold change. This again is the
+recommended code from the
+[zinbwave-deseq2](https://github.com/mikelove/zinbwave-deseq2) repo.
+
+
+```r
 suppressPackageStartupMessages(library(DESeq2))
 dds <- DESeqDataSet(zinb, design=~condition)
-# stabilize the weights to avoid errors
-wts <- assays(dds)[["weights"]]
-wts[wts < 1e-6] <- 1e-6
-assays(dds)[["weights"]] <- wts
-
 # arguments as recommended from Van den Berge and Perraudeau
 dds <- DESeq(dds, test="LRT", reduced=~1,
              sfType="poscounts", minmu=1e-6, minRep=Inf)
@@ -161,6 +197,9 @@ dds <- DESeq(dds, test="LRT", reduced=~1,
 ## fitting model and testing
 ```
 
+We plot the dispersion estimates. If this plot fails, see the
+suggested code in the
+[zinbwave-deseq2](https://github.com/mikelove/zinbwave-deseq2) repo.
 
 
 ```r
@@ -169,16 +208,49 @@ plotDispEsts(dds)
 
 <img src="zinbwave-apeglm_files/figure-html/plotdisp-1.png" width="672" />
 
+We extract and compute a number of estimators for the LFC. 
+
+First, we compute two simple pseudocount based LFC estimates, one without
+using the excess zero weights, and the other using the weights to
+account for excess zeros as identified by *zinbwave*.
+
+
+```r
+ncts <- counts(dds, normalized=TRUE)
+idx1 <- dds$condition == "Group1"
+idx2 <- dds$condition == "Group2"
+pc <- .1
+simple.lfc <- log2(rowMeans(ncts[,idx2])+pc) -
+  log2(rowMeans(ncts[,idx1])+pc)
+wtd.lfc <- log2(rowSums(ncts[,idx2]*wts[,idx2])/rowSums(wts[,idx2])+pc) -
+  log2(rowSums(ncts[,idx1]*wts[,idx1])/rowSums(wts[,idx1])+pc)
+```
+
+The maximum likelihood estimate from *DESeq2*. All of the methods
+using *DESeq2* will take into account the excess zero weights.
+
 
 ```r
 res <- results(dds, name="condition_Group2_vs_Group1",
                independentFiltering=FALSE)
+```
 
-# compare to "old" shrunken LFC
-lfc1 <- lfcShrink(dds, coef=2, type="normal")
+The "old" shrunken LFC from the original *DESeq2* paper, using the
+Normal distribution:
 
-# the apeglm method using weights from zinbwave
-lfc2 <- lfcShrink(dds, coef=2, type="apeglm")
+
+```r
+res.norm <- lfcShrink(dds, coef=2, type="normal")
+```
+
+The new shrunken LFC available in *DESeq2*, using the *apeglm* method
+and a Negative Binomial likelihood, with excess zeros accounted for by
+weights. In this case, the *apeglm* estimator is 10x faster to compute
+than the normal distributed prior estimator above.
+
+
+```r
+ape.nb <- lfcShrink(dds, coef=2, type="apeglm")
 ```
 
 ```
@@ -188,18 +260,27 @@ lfc2 <- lfcShrink(dds, coef=2, type="apeglm")
 ##     bioRxiv. https://doi.org/10.1101/303255
 ```
 
+Finally, we will create a likelihood function for the Zero-Inflated
+Negative Binomial, and set up a number of parameters to pass to the
+*apeglm* function itself. This approach ends up with nearly identical
+results to the use of *lfcShrink* to call *apeglm* above, while
+requiring additional code and slower than the above to compute.
+
+
 ```r
 library(apeglm)
 library(ZIM)
-
 Y <- counts(dds)
 design <- model.matrix(design(dds), data=colData(dds))
 disps <- dispersions(dds)
 wts <- assays(dds)[["weights"]]
+# combine dispersion and wts into a parameter matrix,
+# which will be passed to apeglm
 param <- cbind(disps, 1 - wts)
-offset <- matrix(log(sizeFactors(dds)), nrow=nrow(dds), ncol=ncol(dds), byrow=TRUE)
+offset <- matrix(log(sizeFactors(dds)), nrow=nrow(dds),
+                 ncol=ncol(dds), byrow=TRUE)
+# need to put to natural log scale for apeglm
 mle <- log(2) * cbind(res$log2FoldChange, res$lfcSE)
-
 logLikZINB <- function (y, x, beta, param, offset) {
     xbeta <- x %*% beta + offset
     mean.hat <- exp(xbeta)
@@ -207,44 +288,45 @@ logLikZINB <- function (y, x, beta, param, offset) {
     omega <- param[-1]
     ZIM::dzinb(y, k=k, lambda=mean.hat, omega=omega, log=TRUE)
 }
-
 # run apeglm with a ZINB likelihood and zinbwave weights
-# used to define the probability of a zero
+# used to define the probability of an excess zero
 fit <- apeglm(Y=Y, x=design, log.lik=logLikZINB, param=param,
               coef=2, mle=mle, offset=offset)
-lfc3 <- log2(exp(1)) * fit$map[,2]
+# need to put back to log2 scale
+ape.zinb <- log2(exp(1)) * fit$map[,2]
+```
 
-# simple LFC using pseudocount
-ncts <- counts(dds, normalized=TRUE)
-simple.lfc <- log2(rowMeans(ncts[,dds$condition == "Group2"]) + .1) -
-              log2(rowMeans(ncts[,dds$condition == "Group1"]) + .1)
+Finally, we construct plots to compare our methods. We compute the
+correlation over all genes, the median absolute error (MAE) of the top
+30 genes, and over all genes.
+
+
+```r
+myplot <- function(x,y,n=30,...) {
+  plot(x,y,ylim=c(-6,6),xlab="",ylab="",cex=.5,...)
+  idx <- rank(-abs(y)) < n
+  points(x[idx], y[idx], col="blue", cex=2)
+  abline(0,1,col="red")
+  lgd <- c(paste("cor =", round(cor(x,y,use="complete"),3)),
+           paste("MAE top =", round(mean(abs(x[idx]-y[idx]), na.rm=TRUE),2)),
+           paste("MAE =", round(mean(abs(x-y), na.rm=TRUE),2)))
+  legend("topleft", legend=lgd)
+}
 ```
 
 
 
 ```r
-myplot <- function(x,y,n=20,...) {
-  plot(x,y,ylim=c(-6,6),xlab="",ylab="",cex=.5,...)
-  idx <- rank(-abs(y)) < n
-  points(x[idx], y[idx], col="blue", cex=2)
-  abline(0,1,col="red")
-  legend("topleft",
-      legend=c(
-      paste("cor =",
-            round(cor(x,y,use="complete"),3)),
-      paste("MAE top =",
-            round(mean(abs(x[idx]-y[idx]), na.rm=TRUE),3)),
-      paste("MAE =",
-            round(mean(abs(x-y), na.rm=TRUE),3))))
-}
-par(mfrow=c(2,2), mar=c(2,3,2,1))
-myplot(mcols(dds)$log2FC, lfc1$log2FoldChange, main="normal")
+par(mfrow=c(2,3), mar=c(2,3,2,1))
 myplot(mcols(dds)$log2FC, simple.lfc, main="pseudocount")
-myplot(mcols(dds)$log2FC, lfc2$log2FoldChange, main="apeglm + weight NB")
-myplot(mcols(dds)$log2FC, lfc3, main="apeglm + ZINB lik")
+myplot(mcols(dds)$log2FC, wtd.lfc, main="wtd pseudocount")
+myplot(mcols(dds)$log2FC, res$log2FoldChange, main="MLE")
+myplot(mcols(dds)$log2FC, res.norm$log2FoldChange, main="normal + wtd NB")
+myplot(mcols(dds)$log2FC, ape.nb$log2FoldChange, main="apeglm + wtd NB")
+myplot(mcols(dds)$log2FC, ape.zinb, main="apeglm + ZINB lik")
 ```
 
-<img src="zinbwave-apeglm_files/figure-html/plotlfc-1.png" width="672" />
+<img src="zinbwave-apeglm_files/figure-html/plotlfc-1.png" width="864" />
 
 
 ```r
@@ -263,7 +345,7 @@ session_info()
 ##  language (EN)                        
 ##  collate  en_US.UTF-8                 
 ##  tz       Europe/Rome                 
-##  date     2018-07-10
+##  date     2018-07-11
 ```
 
 ```
