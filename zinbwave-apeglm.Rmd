@@ -127,6 +127,7 @@ account for excess zeros as identified by *zinbwave*.
 
 ```{r}
 ncts <- counts(dds, normalized=TRUE)
+wts <- assays(dds)[["weights"]]
 idx1 <- dds$condition == "Group1"
 idx2 <- dds$condition == "Group2"
 pc <- .1
