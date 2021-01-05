@@ -68,13 +68,13 @@ params <- newSplatParams()
 # LFC centered at 2
 params <- setParam(params, "de.facLoc", log(2) * 2)
 params <- setParam(params, "de.facScale", log(2) * 1)
-params <- setParam(params, "de.prob", .01)
+params <- setParam(params, "de.prob", .05)
 # include drop-out 
 params <- setParam(params, "dropout.type", "experiment")
 params <- setParam(params, "dropout.mid", 2)
 # three groups, we will show apeglm improvements on the two small groups
 sim <- splatSimulate(params, group.prob=c(.2, .2, .6),
-                     method="groups", seed=1)
+                     method="groups", seed=5)
 ```
 
 ```
@@ -106,11 +106,56 @@ sim <- splatSimulate(params, group.prob=c(.2, .2, .6),
 ```
 
 ```
-## Simulating counts..
+## Simulating counts...
 ```
 
 ```
 ## Simulating dropout (if needed)...
+```
+
+```
+## Sparsifying assays...
+```
+
+```
+## Automatically converting to sparse matrices, threshold = 0.95
+```
+
+```
+## Skipping 'BatchCellMeans': estimated sparse size 1.5 * dense matrix
+```
+
+```
+## Skipping 'BaseCellMeans': estimated sparse size 1.5 * dense matrix
+```
+
+```
+## Skipping 'BCV': estimated sparse size 1.5 * dense matrix
+```
+
+```
+## Skipping 'CellMeans': estimated sparse size 1.49 * dense matrix
+```
+
+```
+## Skipping 'TrueCounts': estimated sparse size 1.62 * dense matrix
+```
+
+```
+## Skipping 'DropProb': estimated sparse size 1.5 * dense matrix
+```
+
+```
+## Warning in sparsifyMatrices(assays(sim), auto = TRUE, verbose = verbose): matrix 'Dropout' is class
+## 'matrixarray', unable to estimate size reduction factor
+```
+
+```
+## Converting 'Dropout' to sparse matrix: estimated sparse size NA * dense matrix
+```
+
+```
+## Converting 'counts' to sparse matrix: estimated sparse size 0.58 * dense matrix
 ```
 
 ```
@@ -124,7 +169,7 @@ table(sim$Group)
 ```
 ## 
 ## Group1 Group2 Group3 
-##     17     26     57
+##     28     13     59
 ```
 
 ```r
@@ -147,7 +192,7 @@ table(keep)
 ```
 ## keep
 ## FALSE  TRUE 
-##  7879  2121
+##  7786  2214
 ```
 
 ```r
@@ -155,8 +200,10 @@ zinb <- sim[keep,]
 zinb$condition <- factor(zinb$Group)
 nms <- c("counts", setdiff(assayNames(zinb), "counts"))
 assays(zinb) <- assays(zinb)[nms]
-# epsilon as recommended from Van den Berge and Perraudeau
-zinb <- zinbwave(zinb, K=0, BPPARAM=SerialParam(), epsilon=1e12)
+assay(zinb) <- as.matrix(assay(zinb))
+# epsilon setting as recommended by the ZINB-WaVE integration paper
+zinb <- zinbwave(zinb, K=0, observationalWeights=TRUE,
+                 BPPARAM=BiocParallel::SerialParam(), epsilon=1e12)
 ```
 
 We additionally run *DESeq2* to estimate dispersions and maximum
@@ -168,13 +215,24 @@ recommended code from the
 ```r
 suppressPackageStartupMessages(library(DESeq2))
 dds <- DESeqDataSet(zinb, design=~condition)
-# arguments as recommended from Van den Berge and Perraudeau
-dds <- DESeq(dds, test="LRT", reduced=~1,
-             sfType="poscounts", minmu=1e-6, minRep=Inf)
 ```
 
 ```
-## estimating size factors
+## converting counts to integer mode
+```
+
+```r
+library(scran)
+scr <- computeSumFactors(dds)
+# use scran's sum factors:
+sizeFactors(dds) <- sizeFactors(scr)
+# arguments as recommended from Van den Berge and Perraudeau
+dds <- DESeq(dds, test="LRT", reduced=~1,
+             minmu=1e-6, minRep=Inf)
+```
+
+```
+## using pre-existing size factors
 ```
 
 ```
@@ -183,6 +241,13 @@ dds <- DESeq(dds, test="LRT", reduced=~1,
 
 ```
 ## gene-wise dispersion estimates
+```
+
+```
+## Warning in getAndCheckWeights(object, modelMatrix, weightThreshold = weightThreshold): for 6 row(s), the weights as supplied won't allow parameter estimation, producing a
+##   degenerate design matrix. These rows have been flagged in mcols(dds)$weightsFail
+##   and treated as if the row contained all zeros (mcols(dds)$allZero set to TRUE).
+##   If you are blocking for donors/organisms, consider design = ~0+donor+condition.
 ```
 
 ```
@@ -195,6 +260,10 @@ dds <- DESeq(dds, test="LRT", reduced=~1,
 
 ```
 ## fitting model and testing
+```
+
+```r
+dds <- dds[!mcols(dds)$weightsFail,]
 ```
 
 We plot the dispersion estimates. If this plot fails, see the
@@ -217,6 +286,7 @@ account for excess zeros as identified by *zinbwave*.
 
 ```r
 ncts <- counts(dds, normalized=TRUE)
+wts <- assays(dds)[["weights"]]
 idx1 <- dds$condition == "Group1"
 idx2 <- dds$condition == "Group2"
 pc <- .1
@@ -243,6 +313,14 @@ Normal distribution:
 res.norm <- lfcShrink(dds, coef=2, type="normal")
 ```
 
+```
+## using 'normal' for LFC shrinkage, the Normal prior from Love et al (2014).
+## 
+## Note that type='apeglm' and type='ashr' have shown to have less bias than type='normal'.
+## See ?lfcShrink for more details on shrinkage type, and the DESeq2 vignette.
+## Reference: https://doi.org/10.1093/bioinformatics/bty895
+```
+
 The new shrunken LFC available in *DESeq2*, using the *apeglm* method
 and a Negative Binomial likelihood, with excess zeros accounted for by
 weights. In this case, the *apeglm* estimator is 10x faster to compute
@@ -257,7 +335,7 @@ ape.nb <- lfcShrink(dds, coef=2, type="apeglm")
 ## using 'apeglm' for LFC shrinkage. If used in published research, please cite:
 ##     Zhu, A., Ibrahim, J.G., Love, M.I. (2018) Heavy-tailed prior distributions for
 ##     sequence count data: removing the noise and preserving large differences.
-##     bioRxiv. https://doi.org/10.1101/303255
+##     Bioinformatics. https://doi.org/10.1093/bioinformatics/bty895
 ```
 
 Finally, we will create a likelihood function for the Zero-Inflated
@@ -334,144 +412,134 @@ session_info()
 ```
 
 ```
-## Session info -------------------------------------------------------------
-```
-
-```
+## ─ Session info ───────────────────────────────────────────────────────────────────────────────────
 ##  setting  value                       
-##  version  R version 3.5.0 (2018-04-23)
-##  system   x86_64, darwin15.6.0        
+##  version  R version 4.0.3 (2020-10-10)
+##  os       macOS Catalina 10.15.6      
+##  system   x86_64, darwin17.0          
 ##  ui       X11                         
 ##  language (EN)                        
 ##  collate  en_US.UTF-8                 
-##  tz       Europe/Rome                 
-##  date     2018-07-11
-```
-
-```
-## Packages -----------------------------------------------------------------
-```
-
-```
-##  package              * version   date       source         
-##  acepack                1.4.1     2016-10-29 CRAN (R 3.5.0) 
-##  ADGofTest              0.3       2011-12-28 CRAN (R 3.5.0) 
-##  annotate               1.58.0    2018-05-01 Bioconductor   
-##  AnnotationDbi          1.42.1    2018-05-08 Bioconductor   
-##  apeglm               * 1.2.0     2018-05-01 Bioconductor   
-##  assertthat             0.2.0     2017-04-11 CRAN (R 3.5.0) 
-##  backports              1.1.2     2017-12-13 cran (@1.1.2)  
-##  base                 * 3.5.0     2018-04-24 local          
-##  base64enc              0.1-3     2015-07-28 CRAN (R 3.5.0) 
-##  bbmle                  1.0.20    2017-10-30 CRAN (R 3.5.0) 
-##  bindr                  0.1.1     2018-03-13 CRAN (R 3.5.0) 
-##  bindrcpp               0.2.2     2018-03-29 CRAN (R 3.5.0) 
-##  Biobase              * 2.40.0    2018-05-01 Bioconductor   
-##  BiocGenerics         * 0.26.0    2018-05-01 Bioconductor   
-##  BiocInstaller        * 1.30.0    2018-05-04 Bioconductor   
-##  BiocParallel         * 1.14.1    2018-05-06 Bioconductor   
-##  bit                    1.1-14    2018-05-29 CRAN (R 3.5.0) 
-##  bit64                  0.9-7     2017-05-08 CRAN (R 3.5.0) 
-##  bitops                 1.0-6     2013-08-17 CRAN (R 3.5.0) 
-##  blob                   1.1.1     2018-03-25 CRAN (R 3.5.0) 
-##  checkmate              1.8.5     2017-10-24 CRAN (R 3.5.0) 
-##  cluster                2.0.7-1   2018-04-13 CRAN (R 3.5.0) 
-##  coda                   0.19-1    2016-12-08 CRAN (R 3.5.0) 
-##  codetools              0.2-15    2016-10-05 CRAN (R 3.5.0) 
-##  colorspace             1.3-2     2016-12-14 CRAN (R 3.5.0) 
-##  compiler               3.5.0     2018-04-24 local          
-##  copula                 0.999-18  2017-09-01 CRAN (R 3.5.0) 
-##  data.table             1.11.4    2018-05-27 CRAN (R 3.5.0) 
-##  datasets             * 3.5.0     2018-04-24 local          
-##  DBI                    1.0.0     2018-05-02 CRAN (R 3.5.0) 
-##  DelayedArray         * 0.6.1     2018-06-15 Bioconductor   
-##  DESeq2               * 1.20.0    2018-05-01 Bioconductor   
-##  devtools             * 1.13.6    2018-06-27 CRAN (R 3.5.0) 
-##  digest                 0.6.15    2018-01-28 cran (@0.6.15) 
-##  dplyr                  0.7.5     2018-05-19 cran (@0.7.5)  
-##  edgeR                  3.22.3    2018-06-21 Bioconductor   
-##  emdbook                1.3.9     2016-02-11 CRAN (R 3.5.0) 
-##  evaluate               0.10.1    2017-06-24 CRAN (R 3.5.0) 
-##  foreach                1.4.4     2017-12-12 CRAN (R 3.5.0) 
-##  foreign                0.8-70    2017-11-28 CRAN (R 3.5.0) 
-##  Formula                1.2-3     2018-05-03 CRAN (R 3.5.0) 
-##  genefilter             1.62.0    2018-05-01 Bioconductor   
-##  geneplotter            1.58.0    2018-05-01 Bioconductor   
-##  GenomeInfoDb         * 1.16.0    2018-05-01 Bioconductor   
-##  GenomeInfoDbData       1.1.0     2018-01-10 Bioconductor   
-##  GenomicRanges        * 1.32.3    2018-05-16 Bioconductor   
-##  ggplot2                3.0.0     2018-07-03 CRAN (R 3.5.0) 
-##  glmnet                 2.0-16    2018-04-02 CRAN (R 3.5.0) 
-##  glue                   1.2.0     2017-10-29 CRAN (R 3.5.0) 
-##  graphics             * 3.5.0     2018-04-24 local          
-##  grDevices            * 3.5.0     2018-04-24 local          
-##  grid                   3.5.0     2018-04-24 local          
-##  gridExtra              2.3       2017-09-09 CRAN (R 3.5.0) 
-##  gsl                    1.9-10.3  2017-01-05 CRAN (R 3.5.0) 
-##  gtable                 0.2.0     2016-02-26 CRAN (R 3.5.0) 
-##  Hmisc                  4.1-1     2018-01-03 CRAN (R 3.5.0) 
-##  htmlTable              1.12      2018-05-26 CRAN (R 3.5.0) 
-##  htmltools              0.3.6     2017-04-28 CRAN (R 3.5.0) 
-##  htmlwidgets            1.2       2018-04-19 CRAN (R 3.5.0) 
-##  IRanges              * 2.14.10   2018-05-16 Bioconductor   
-##  iterators              1.0.9     2017-12-12 CRAN (R 3.5.0) 
-##  knitr                  1.20      2018-02-20 CRAN (R 3.5.0) 
-##  lattice                0.20-35   2017-03-25 CRAN (R 3.5.0) 
-##  latticeExtra           0.6-28    2016-02-09 CRAN (R 3.5.0) 
-##  lazyeval               0.2.1     2017-10-29 CRAN (R 3.5.0) 
-##  limma                  3.36.2    2018-06-21 Bioconductor   
-##  locfit                 1.5-9.1   2013-04-20 CRAN (R 3.5.0) 
-##  magrittr               1.5       2014-11-22 CRAN (R 3.5.0) 
-##  MASS                 * 7.3-50    2018-04-30 CRAN (R 3.5.0) 
-##  Matrix                 1.2-14    2018-04-13 CRAN (R 3.5.0) 
-##  matrixStats          * 0.53.1    2018-02-11 CRAN (R 3.5.0) 
-##  memoise                1.1.0     2017-04-21 CRAN (R 3.5.0) 
-##  methods              * 3.5.0     2018-04-24 local          
-##  munsell                0.5.0     2018-06-12 CRAN (R 3.5.0) 
-##  mvtnorm                1.0-7     2018-01-26 CRAN (R 3.5.0) 
-##  nnet                   7.3-12    2016-02-02 CRAN (R 3.5.0) 
-##  numDeriv               2016.8-1  2016-08-27 CRAN (R 3.5.0) 
-##  parallel             * 3.5.0     2018-04-24 local          
-##  pcaPP                  1.9-73    2018-01-14 CRAN (R 3.5.0) 
-##  pillar                 1.2.3     2018-05-25 CRAN (R 3.5.0) 
-##  pkgconfig              2.0.1     2017-03-21 CRAN (R 3.5.0) 
-##  plyr                   1.8.4     2016-06-08 CRAN (R 3.5.0) 
-##  pspline                1.0-18    2017-06-12 CRAN (R 3.5.0) 
-##  purrr                  0.2.5     2018-05-29 cran (@0.2.5)  
-##  R6                     2.2.2     2017-06-17 CRAN (R 3.5.0) 
-##  RColorBrewer           1.1-2     2014-12-07 CRAN (R 3.5.0) 
-##  Rcpp                   0.12.17   2018-05-18 cran (@0.12.17)
-##  RCurl                  1.95-4.10 2018-01-04 CRAN (R 3.5.0) 
-##  rlang                  0.2.1     2018-05-30 cran (@0.2.1)  
-##  rmarkdown            * 1.9       2018-03-01 CRAN (R 3.5.0) 
-##  rpart                  4.1-13    2018-02-23 CRAN (R 3.5.0) 
-##  rprojroot              1.3-2     2018-01-03 cran (@1.3-2)  
-##  RSQLite                2.1.1     2018-05-06 CRAN (R 3.5.0) 
-##  rstudioapi             0.7       2017-09-07 CRAN (R 3.5.0) 
-##  S4Vectors            * 0.18.3    2018-06-08 Bioconductor   
-##  scales                 0.5.0     2017-08-24 CRAN (R 3.5.0) 
-##  SingleCellExperiment * 1.2.0     2018-05-01 Bioconductor   
-##  softImpute             1.4       2015-04-08 CRAN (R 3.5.0) 
-##  splatter             * 1.4.0     2018-05-01 Bioconductor   
-##  splines                3.5.0     2018-04-24 local          
-##  stabledist             0.7-1     2016-09-12 CRAN (R 3.5.0) 
-##  stats                * 3.5.0     2018-04-24 local          
-##  stats4               * 3.5.0     2018-04-24 local          
-##  stringi                1.2.3     2018-06-12 CRAN (R 3.5.0) 
-##  stringr                1.3.1     2018-05-10 CRAN (R 3.5.0) 
-##  SummarizedExperiment * 1.10.1    2018-05-11 Bioconductor   
-##  survival               2.42-3    2018-04-16 CRAN (R 3.5.0) 
-##  testthat             * 2.0.0     2017-12-13 CRAN (R 3.5.0) 
-##  tibble                 1.4.2     2018-01-22 CRAN (R 3.5.0) 
-##  tidyselect             0.2.4     2018-02-26 CRAN (R 3.5.0) 
-##  tools                  3.5.0     2018-04-24 local          
-##  utils                * 3.5.0     2018-04-24 local          
-##  withr                  2.1.2     2018-03-15 CRAN (R 3.5.0) 
-##  XML                    3.98-1.11 2018-04-16 CRAN (R 3.5.0) 
-##  xtable                 1.8-2     2016-02-05 CRAN (R 3.5.0) 
-##  XVector                0.20.0    2018-05-01 Bioconductor   
-##  yaml                   2.1.19    2018-05-01 CRAN (R 3.5.0) 
-##  ZIM                  * 1.0.3     2017-02-06 CRAN (R 3.5.0) 
-##  zinbwave             * 1.2.0     2018-05-01 Bioconductor   
-##  zlibbioc               1.26.0    2018-05-01 Bioconductor
+##  ctype    en_US.UTF-8                 
+##  tz       America/New_York            
+##  date     2021-01-05                  
+## 
+## ─ Packages ───────────────────────────────────────────────────────────────────────────────────────
+##  package              * version    date       lib source        
+##  annotate               1.68.0     2020-10-27 [1] Bioconductor  
+##  AnnotationDbi          1.52.0     2020-10-27 [1] Bioconductor  
+##  apeglm               * 1.12.0     2020-10-27 [1] Bioconductor  
+##  assertthat             0.2.1      2019-03-21 [1] CRAN (R 4.0.0)
+##  backports              1.2.1      2020-12-09 [1] CRAN (R 4.0.2)
+##  bbmle                  1.0.23.1   2020-02-03 [1] CRAN (R 4.0.0)
+##  bdsmatrix              1.3-4      2020-01-13 [1] CRAN (R 4.0.0)
+##  beachmat               2.6.4      2020-12-20 [1] Bioconductor  
+##  Biobase              * 2.50.0     2020-10-27 [1] Bioconductor  
+##  BiocGenerics         * 0.36.0     2020-10-27 [1] Bioconductor  
+##  BiocNeighbors          1.8.2      2020-12-07 [1] Bioconductor  
+##  BiocParallel         * 1.24.1     2020-11-06 [1] Bioconductor  
+##  BiocSingular           1.6.0      2020-10-27 [1] Bioconductor  
+##  bit                    4.0.4      2020-08-04 [1] CRAN (R 4.0.2)
+##  bit64                  4.0.5      2020-08-30 [1] CRAN (R 4.0.2)
+##  bitops                 1.0-6      2013-08-17 [1] CRAN (R 4.0.0)
+##  blob                   1.2.1      2020-01-20 [1] CRAN (R 4.0.0)
+##  bluster                1.0.0      2020-10-27 [1] Bioconductor  
+##  callr                  3.5.1      2020-10-13 [1] CRAN (R 4.0.2)
+##  checkmate              2.0.0      2020-02-06 [1] CRAN (R 4.0.0)
+##  cli                    2.2.0      2020-11-20 [1] CRAN (R 4.0.2)
+##  coda                   0.19-4     2020-09-30 [1] CRAN (R 4.0.2)
+##  colorspace             2.0-0      2020-11-11 [1] CRAN (R 4.0.2)
+##  crayon                 1.3.4      2017-09-16 [1] CRAN (R 4.0.0)
+##  DBI                    1.1.0      2019-12-15 [1] CRAN (R 4.0.0)
+##  DelayedArray           0.16.0     2020-10-27 [1] Bioconductor  
+##  DelayedMatrixStats     1.12.1     2020-11-24 [1] Bioconductor  
+##  desc                   1.2.0      2018-05-01 [1] CRAN (R 4.0.0)
+##  DESeq2               * 1.30.0     2020-10-27 [1] Bioconductor  
+##  devtools             * 2.3.2      2020-09-18 [1] CRAN (R 4.0.2)
+##  digest                 0.6.27     2020-10-24 [1] CRAN (R 4.0.2)
+##  dplyr                  1.0.2      2020-08-18 [1] CRAN (R 4.0.2)
+##  dqrng                  0.2.1      2019-05-17 [1] CRAN (R 4.0.0)
+##  edgeR                  3.32.0     2020-10-27 [1] Bioconductor  
+##  ellipsis               0.3.1      2020-05-15 [1] CRAN (R 4.0.2)
+##  emdbook                1.3.12     2020-02-19 [1] CRAN (R 4.0.0)
+##  evaluate               0.14       2019-05-28 [1] CRAN (R 4.0.0)
+##  fansi                  0.4.1      2020-01-08 [1] CRAN (R 4.0.0)
+##  fs                     1.5.0      2020-07-31 [1] CRAN (R 4.0.2)
+##  genefilter             1.72.0     2020-10-27 [1] Bioconductor  
+##  geneplotter            1.68.0     2020-10-27 [1] Bioconductor  
+##  generics               0.1.0      2020-10-31 [1] CRAN (R 4.0.2)
+##  GenomeInfoDb         * 1.26.2     2020-12-08 [1] Bioconductor  
+##  GenomeInfoDbData       1.2.4      2020-11-09 [1] Bioconductor  
+##  GenomicRanges        * 1.42.0     2020-10-27 [1] Bioconductor  
+##  ggplot2                3.3.3      2020-12-30 [1] CRAN (R 4.0.3)
+##  glue                   1.4.2      2020-08-27 [1] CRAN (R 4.0.2)
+##  gtable                 0.3.0      2019-03-25 [1] CRAN (R 4.0.0)
+##  htmltools              0.5.0      2020-06-16 [1] CRAN (R 4.0.2)
+##  httr                   1.4.2      2020-07-20 [1] CRAN (R 4.0.2)
+##  igraph                 1.2.6      2020-10-06 [1] CRAN (R 4.0.2)
+##  IRanges              * 2.24.1     2020-12-12 [1] Bioconductor  
+##  irlba                  2.3.3      2019-02-05 [1] CRAN (R 4.0.0)
+##  knitr                  1.30       2020-09-22 [1] CRAN (R 4.0.2)
+##  lattice                0.20-41    2020-04-02 [1] CRAN (R 4.0.3)
+##  lifecycle              0.2.0      2020-03-06 [1] CRAN (R 4.0.0)
+##  limma                  3.46.0     2020-10-27 [1] Bioconductor  
+##  locfit                 1.5-9.4    2020-03-25 [1] CRAN (R 4.0.0)
+##  magrittr               2.0.1      2020-11-17 [1] CRAN (R 4.0.2)
+##  MASS                   7.3-53     2020-09-09 [1] CRAN (R 4.0.3)
+##  Matrix                 1.3-0      2020-12-22 [1] CRAN (R 4.0.2)
+##  MatrixGenerics       * 1.2.0      2020-10-27 [1] Bioconductor  
+##  matrixStats          * 0.57.0     2020-09-25 [1] CRAN (R 4.0.2)
+##  memoise                1.1.0      2017-04-21 [1] CRAN (R 4.0.0)
+##  munsell                0.5.0      2018-06-12 [1] CRAN (R 4.0.0)
+##  mvtnorm                1.1-1      2020-06-09 [1] CRAN (R 4.0.2)
+##  numDeriv               2016.8-1.1 2019-06-06 [1] CRAN (R 4.0.0)
+##  pillar                 1.4.7      2020-11-20 [1] CRAN (R 4.0.2)
+##  pkgbuild               1.2.0      2020-12-15 [1] CRAN (R 4.0.2)
+##  pkgconfig              2.0.3      2019-09-22 [1] CRAN (R 4.0.0)
+##  pkgload                1.1.0      2020-05-29 [1] CRAN (R 4.0.2)
+##  plyr                   1.8.6      2020-03-03 [1] CRAN (R 4.0.0)
+##  prettyunits            1.1.1      2020-01-24 [1] CRAN (R 4.0.0)
+##  processx               3.4.5      2020-11-30 [1] CRAN (R 4.0.2)
+##  ps                     1.5.0      2020-12-05 [1] CRAN (R 4.0.2)
+##  purrr                  0.3.4      2020-04-17 [1] CRAN (R 4.0.0)
+##  R6                     2.5.0      2020-10-28 [1] CRAN (R 4.0.2)
+##  RColorBrewer           1.1-2      2014-12-07 [1] CRAN (R 4.0.0)
+##  Rcpp                   1.0.5      2020-07-06 [1] CRAN (R 4.0.2)
+##  RCurl                  1.98-1.2   2020-04-18 [1] CRAN (R 4.0.0)
+##  remotes                2.2.0      2020-07-21 [1] CRAN (R 4.0.2)
+##  rlang                  0.4.9      2020-11-26 [1] CRAN (R 4.0.2)
+##  rmarkdown            * 2.6        2020-12-14 [1] CRAN (R 4.0.2)
+##  rprojroot              2.0.2      2020-11-15 [1] CRAN (R 4.0.2)
+##  RSQLite                2.2.1      2020-09-30 [1] CRAN (R 4.0.2)
+##  rsvd                   1.0.3      2020-02-17 [1] CRAN (R 4.0.0)
+##  S4Vectors            * 0.28.1     2020-12-09 [1] Bioconductor  
+##  scales                 1.1.1      2020-05-11 [1] CRAN (R 4.0.0)
+##  scran                * 1.18.3     2020-12-21 [1] Bioconductor  
+##  scuttle                1.0.4      2020-12-17 [1] Bioconductor  
+##  sessioninfo            1.1.1      2018-11-05 [1] CRAN (R 4.0.0)
+##  SingleCellExperiment * 1.12.0     2020-10-27 [1] Bioconductor  
+##  softImpute             1.4        2015-04-08 [1] CRAN (R 4.0.0)
+##  sparseMatrixStats      1.2.0      2020-10-27 [1] Bioconductor  
+##  splatter             * 1.14.1     2020-12-01 [1] Bioconductor  
+##  statmod                1.4.35     2020-10-19 [1] CRAN (R 4.0.2)
+##  stringi                1.5.3      2020-09-09 [1] CRAN (R 4.0.2)
+##  stringr                1.4.0      2019-02-10 [1] CRAN (R 4.0.0)
+##  SummarizedExperiment * 1.20.0     2020-10-27 [1] Bioconductor  
+##  survival               3.2-7      2020-09-28 [1] CRAN (R 4.0.3)
+##  testthat             * 3.0.1      2020-12-17 [1] CRAN (R 4.0.2)
+##  tibble                 3.0.4      2020-10-12 [1] CRAN (R 4.0.2)
+##  tidyselect             1.1.0      2020-05-11 [1] CRAN (R 4.0.2)
+##  usethis              * 2.0.0      2020-12-10 [1] CRAN (R 4.0.2)
+##  vctrs                  0.3.6      2020-12-17 [1] CRAN (R 4.0.2)
+##  withr                  2.3.0      2020-09-22 [1] CRAN (R 4.0.2)
+##  xfun                   0.19       2020-10-30 [1] CRAN (R 4.0.2)
+##  XML                    3.99-0.5   2020-07-23 [1] CRAN (R 4.0.2)
+##  xtable                 1.8-4      2019-04-21 [1] CRAN (R 4.0.0)
+##  XVector                0.30.0     2020-10-28 [1] Bioconductor  
+##  yaml                   2.2.1      2020-02-01 [1] CRAN (R 4.0.0)
+##  ZIM                  * 1.1.0      2018-08-28 [1] CRAN (R 4.0.2)
+##  zinbwave             * 1.12.0     2020-10-28 [1] Bioconductor  
+##  zlibbioc               1.36.0     2020-10-28 [1] Bioconductor  
+## 
+## [1] /Library/Frameworks/R.framework/Versions/4.0/Resources/library
 ```

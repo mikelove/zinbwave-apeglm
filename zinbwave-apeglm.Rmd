@@ -50,7 +50,7 @@ first is already built in to *DESeq2*'s *lfcShrink* function and has
 been optimized for speed.
 
 ```{r setup, echo=FALSE}
-knitr::opts_chunk$set(cache=TRUE)
+knitr::opts_chunk$set(cache=FALSE)
 ```
 
 We construct simulated single cell data using *splatter*. The custom
@@ -69,13 +69,13 @@ params <- newSplatParams()
 # LFC centered at 2
 params <- setParam(params, "de.facLoc", log(2) * 2)
 params <- setParam(params, "de.facScale", log(2) * 1)
-params <- setParam(params, "de.prob", .01)
+params <- setParam(params, "de.prob", .05)
 # include drop-out 
 params <- setParam(params, "dropout.type", "experiment")
 params <- setParam(params, "dropout.mid", 2)
 # three groups, we will show apeglm improvements on the two small groups
 sim <- splatSimulate(params, group.prob=c(.2, .2, .6),
-                     method="groups", seed=1)
+                     method="groups", seed=5)
 table(sim$Group)
 # define the true LFC
 rowData(sim)$log2FC <- with(rowData(sim), log2(DEFacGroup2/DEFacGroup1))
@@ -94,8 +94,10 @@ zinb <- sim[keep,]
 zinb$condition <- factor(zinb$Group)
 nms <- c("counts", setdiff(assayNames(zinb), "counts"))
 assays(zinb) <- assays(zinb)[nms]
-# epsilon as recommended from Van den Berge and Perraudeau
-zinb <- zinbwave(zinb, K=0, BPPARAM=SerialParam(), epsilon=1e12)
+assay(zinb) <- as.matrix(assay(zinb))
+# epsilon setting as recommended by the ZINB-WaVE integration paper
+zinb <- zinbwave(zinb, K=0, observationalWeights=TRUE,
+                 BPPARAM=BiocParallel::SerialParam(), epsilon=1e12)
 ```
 
 We additionally run *DESeq2* to estimate dispersions and maximum
@@ -106,9 +108,14 @@ recommended code from the
 ```{r}
 suppressPackageStartupMessages(library(DESeq2))
 dds <- DESeqDataSet(zinb, design=~condition)
+library(scran)
+scr <- computeSumFactors(dds)
+# use scran's sum factors:
+sizeFactors(dds) <- sizeFactors(scr)
 # arguments as recommended from Van den Berge and Perraudeau
 dds <- DESeq(dds, test="LRT", reduced=~1,
-             sfType="poscounts", minmu=1e-6, minRep=Inf)
+             minmu=1e-6, minRep=Inf)
+dds <- dds[!mcols(dds)$weightsFail,]
 ```
 
 We plot the dispersion estimates. If this plot fails, see the
